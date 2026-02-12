@@ -1,9 +1,10 @@
 /**
- * WorkerLarkBot - v11.4
+ * WorkerLarkBot - v11.6
  */
 const CONFIG = {
-  PRIMARY_MODEL: "gemini-flash-latest", 
-  FALLBACK_MODEL: "gemma-3-12b-it",
+  MODEL_1: "gemini-flash-latest",   // Tier 1: Gemini 3 Flash
+  MODEL_2: "gemini-2.5-flash",    // Tier 2: Gemini 2.5 Flash
+  MODEL_3: "gemma-3-12b-it",      // Tier 3: Gemma 3
   BASE_URL_LARK: "https://open.larksuite.com/open-apis",
   BASE_URL_GOOGLE: "https://generativelanguage.googleapis.com/v1beta",
   TEMPERATURE: 0.5
@@ -30,6 +31,7 @@ export default {
 
   async processWorkflow(messageId, userQuery, userDateTime, env) {
     try {
+      // Ensure these environment keys match exactly what you have in Cloudflare
       const [appId, appSecret, apiKey] = await Promise.all([
         env.LARK_APP_ID.get(),
         env.LARK_APP_SECRET.get(),
@@ -41,17 +43,21 @@ export default {
 
       await this.addReaction(messageId, "THINKING", token);
 
-      // Attempt Primary
-      let aiText = await this.generateAIResponse(CONFIG.PRIMARY_MODEL, `${systemRule}${userQuery}`, apiKey);
-      
-      // Fallback Logic: Check for Quota or Regional Block
-      if (aiText === "FALLBACK_REQUIRED") {
-        console.warn(`[DEBUG] Primary model ${CONFIG.PRIMARY_MODEL} failed (Quota/Location). Switching to fallback.`);
-        aiText = await this.generateAIResponse(CONFIG.FALLBACK_MODEL, `${systemRule}${userQuery}`, apiKey);
+      const models = [CONFIG.MODEL_1, CONFIG.MODEL_2, CONFIG.MODEL_3];
+      let aiText = "FALLBACK_REQUIRED";
+
+      for (const model of models) {
+        aiText = await this.generateAIResponse(model, `${systemRule}${userQuery}`, apiKey);
+        if (aiText !== "FALLBACK_REQUIRED") break; 
       }
 
-      await this.sendLarkCard(messageId, aiText, token);
-      await this.addReaction(messageId, "DONE", token);
+      if (aiText === "FALLBACK_REQUIRED") {
+        await this.addReaction(messageId, "ERROR", token); 
+        await this.sendLarkCard(messageId, "❌ Service Unavailable: All configured AI models are currently unreachable.", token);
+      } else {
+        await this.sendLarkCard(messageId, aiText, token);
+        await this.addReaction(messageId, "DONE", token);
+      }
 
     } catch (err) {
       console.error(`[CRITICAL ERROR]: ${err.message}`);
@@ -76,9 +82,7 @@ export default {
     const data = await resp.json();
     console.log(`[DEBUG] Full API Response (${modelName}):`, JSON.stringify(data));
 
-    // Handle Failover Cases
-    if (resp.status === 429) return "FALLBACK_REQUIRED";
-    if (resp.status === 400 && data.error?.status === "FAILED_PRECONDITION") {
+    if (resp.status === 429 || (resp.status === 400 && data.error?.status === "FAILED_PRECONDITION")) {
        return "FALLBACK_REQUIRED";
     }
 
