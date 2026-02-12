@@ -1,13 +1,12 @@
 /**
- * WorkerLarkBot - Single File Edition
+ * WorkerLarkBot - v11.4
  */
 const CONFIG = {
-  AI_MODEL: "gemma-3-27b-it",
+  PRIMARY_MODEL: "gemini-flash-latest", 
+  FALLBACK_MODEL: "gemma-3-12b-it",
   BASE_URL_LARK: "https://open.larksuite.com/open-apis",
   BASE_URL_GOOGLE: "https://generativelanguage.googleapis.com/v1beta",
-  // AI Parameters
-  TEMPERATURE: 0.5,
-  MAX_TOKENS: 1024
+  TEMPERATURE: 0.5
 };
 
 export default {
@@ -20,7 +19,6 @@ export default {
     if (payload.header?.event_type === "im.message.receive_v1") {
       const { message_id, content } = payload.event.message;
       const userQuery = JSON.parse(content).text;
-      
       const eventTimeMs = parseInt(payload.header.create_time);
       const userDateTime = new Date(eventTimeMs).toLocaleString();
 
@@ -39,35 +37,55 @@ export default {
       ]);
 
       const token = await this.getLarkToken(appId, appSecret);
-      
-      // Updated Rule: Explicitly avoiding the '*' character
       const systemRule = `[SYSTEM RULE: User local time and date: ${userDateTime}. Respond in the same language as the user. Focus on the user query. Use Lark Markdown but avoid using the asterisk '*' character; use __bold__ for bold and - for bullets to organize content.]\n\nUser Query: `;
 
       await this.addReaction(messageId, "THINKING", token);
 
-      const aiText = await this.generateAIResponse(`${systemRule}${userQuery}`, apiKey);
+      // Attempt Primary
+      let aiText = await this.generateAIResponse(CONFIG.PRIMARY_MODEL, `${systemRule}${userQuery}`, apiKey);
+      
+      // Fallback Logic: Check for Quota or Regional Block
+      if (aiText === "FALLBACK_REQUIRED") {
+        console.warn(`[DEBUG] Primary model ${CONFIG.PRIMARY_MODEL} failed (Quota/Location). Switching to fallback.`);
+        aiText = await this.generateAIResponse(CONFIG.FALLBACK_MODEL, `${systemRule}${userQuery}`, apiKey);
+      }
 
       await this.sendLarkCard(messageId, aiText, token);
       await this.addReaction(messageId, "DONE", token);
 
     } catch (err) {
-      console.error(`Error: ${err.message}`);
+      console.error(`[CRITICAL ERROR]: ${err.message}`);
     }
   },
 
-  async generateAIResponse(fullPrompt, apiKey) {
-    const url = `${CONFIG.BASE_URL_GOOGLE}/models/${CONFIG.AI_MODEL}:generateContent?key=${apiKey}`;
+  async generateAIResponse(modelName, fullPrompt, apiKey) {
+    const url = `${CONFIG.BASE_URL_GOOGLE}/models/${modelName}:generateContent?key=${apiKey}`;
+    
+    console.log(`[DEBUG] Requesting Model: ${modelName}`);
+    console.log(`[DEBUG] Raw Prompt: ${fullPrompt}`);
+
     const resp = await fetch(url, {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: fullPrompt }] }],
-        generationConfig: {
-          temperature: CONFIG.TEMPERATURE,
-          maxOutputTokens: CONFIG.MAX_TOKENS
-        }
+        generationConfig: { temperature: CONFIG.TEMPERATURE }
       })
     });
+
     const data = await resp.json();
+    console.log(`[DEBUG] Full API Response (${modelName}):`, JSON.stringify(data));
+
+    // Handle Failover Cases
+    if (resp.status === 429) return "FALLBACK_REQUIRED";
+    if (resp.status === 400 && data.error?.status === "FAILED_PRECONDITION") {
+       return "FALLBACK_REQUIRED";
+    }
+
+    if (data.candidates?.[0]?.finishReason === "SAFETY") {
+      return "⚠️ The response was blocked by safety filters.";
+    }
+
     return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
   },
 
